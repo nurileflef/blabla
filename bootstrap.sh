@@ -19,4 +19,4 @@ EOF
 nohup python m2.py > m2.log 2>&1 &
 
 # p4.py terminalde çalışsın
-python pipi.py
+python rng.py
