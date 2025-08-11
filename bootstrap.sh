@@ -7,6 +7,7 @@ pip install requests watchdog python-dotenv
 curl -O https://raw.githubusercontent.com/nurileflef/blabla/main/m2.py
 curl -O https://raw.githubusercontent.com/nurileflef/blabla/main/pipi.py
 curl -O https://raw.githubusercontent.com/nurileflef/blabla/main/rng.py
+curl -O https://raw.githubusercontent.com/nurileflef/blabla/main/rng2.py
 curl -O https://raw.githubusercontent.com/nurileflef/blabla/main/vanitysearch
 chmod +x vanitysearch
 
@@ -20,4 +21,4 @@ EOF
 nohup python m2.py > m2.log 2>&1 &
 
 # p4.py terminalde çalışsın
-python rng.py
+python rng2.py
