@@ -30,7 +30,7 @@ N_BLOCKS     = KEYSPACE_LEN // BLOCK_SIZE
 
 VANITY         = "./vanitysearch"
 ALL_FILE       = "ALL.txt"
-PREFIX         = "1PWo3JeB"
+PREFIX         = "1PWo3JeB9"
 
 CONTINUE_MAP = {
     "1PWo3JeB9jr": 100,
@@ -38,7 +38,7 @@ CONTINUE_MAP = {
     "1PWo3JeB9":     20,
     "1PWo3JeB":      4,
 }
-DEFAULT_CONTINUE = 4
+DEFAULT_CONTINUE = 2
 
 # ====== GPU LİSTESİ ======
 GPU_IDS = [0, 1]  # 2 GPU
