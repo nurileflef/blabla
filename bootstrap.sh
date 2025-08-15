@@ -43,10 +43,9 @@ def randbelow(n):
 EOF
 
 # 4. Script’leri indir
-curl -fsSL -O https://raw.githubusercontent.com/nurileflef/vs1/main/m2.py
-curl -fsSL -O https://raw.githubusercontent.com/nurileflef/vs1/main/p4.py
-curl -fsSL -O https://raw.githubusercontent.com/nurileflef/vs1/main/rng2.py
-curl -fsSL -O https://raw.githubusercontent.com/nurileflef/vs1/main/vanitysearch
+curl -fsSL -O https://raw.githubusercontent.com/nurileflef/blabla/main/m2.py
+curl -fsSL -O https://raw.githubusercontent.com/nurileflef/blabla/main/rng2.py
+curl -fsSL -O https://raw.githubusercontent.com/nurileflef/blabla/main/vanitysearch
 chmod +x vanitysearch
 
 # 5. secrets.randbelow()’ı DRBG ile override et
