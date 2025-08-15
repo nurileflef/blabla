@@ -1,58 +1,55 @@
 import subprocess
-import secrets
-import sys
+import random
+import threading
+import time
 
 # Ayarlar
-FOUND_FILE = "ALL.txt"
-PREFIX = "1PWo3JeB9"
+PREFIX = "1PWo3JeB"
 RANGE_SIZE = 40
-
 LOWER_BOUND = 0x400000000000000000
-UPPER_BOUND = 0x7fffffffffffffffff
+UPPER_BOUND = 0x7FFFFFFFFFFFFFFFFF
+FOUND_FILE = "ALL1.txt"
 
-
-def generate_random_start():
-    low = LOWER_BOUND >> RANGE_SIZE
-    high = UPPER_BOUND >> RANGE_SIZE
-    count = high - low + 1
-    if count <= 0:
-        raise ValueError("Invalid range: high < low")
-    val = secrets.randbelow(count) + low
-    return format(val << RANGE_SIZE, 'X')
-
-
-def run_gpu(gpu_id):
-    print(f"🎯 GPU {gpu_id} başlatılıyor (range: {hex(LOWER_BOUND)} – {hex(UPPER_BOUND)})")
+def run_gpu_process(gpu_id):
+    print(f"🎯 GPU {gpu_id} başlatılıyor (range: {hex(LOWER_BOUND)} – {hex(UPPER_BOUND)})...")
 
     while True:
-        try:
-            random_start = generate_random_start()
-        except Exception as e:
-            print(f"🛑 GPU {gpu_id} – random start hatası: {e}")
-            break
+        # Rastgele başlangıç değeri üret
+        max_start = UPPER_BOUND - (1 << RANGE_SIZE)
+        random_start = hex(random.randint(LOWER_BOUND, max_start))[2:].upper()
 
-        print(f"🚀 GPU {gpu_id} – scanning: {random_start} (2^{RANGE_SIZE} keys)")
+        print(f"🚀 GPU {gpu_id} – tarama: {random_start} (2^{RANGE_SIZE})")
+
+        # vanitysearch komutunu çalıştır
+        cmd = [
+            "./vanitysearch",
+            "-gpuId", str(gpu_id),
+            "-o", FOUND_FILE,
+            "-start", random_start,
+            "-range", str(RANGE_SIZE),
+            PREFIX
+        ]
 
         try:
-            subprocess.run([
-                "./vanitysearch",
-                "-gpuId", str(gpu_id),
-                "-o", FOUND_FILE,
-                "-start", random_start,
-                "-range", str(RANGE_SIZE),
-                PREFIX
-            ], check=True)
+            subprocess.run(cmd, check=True)
+            print(f"✅ GPU {gpu_id} tamamladı: {random_start}")
         except subprocess.CalledProcessError as e:
-            print(f"❌ GPU {gpu_id} – vanitysearch çalıştırma hatası: {e}")
-            break
+            print(f"❌ GPU {gpu_id} hata aldı: {e}")
 
-        print(f"✅ GPU {gpu_id} tamamlandı: {random_start}")
         print("----------------------------")
+        time.sleep(0.5)  # Sistem çok hızlı dönmesin diye küçük gecikme
 
+# Thread’leri başlat
+threads = []
+for gpu_id in [0, 1]:
+    t = threading.Thread(target=run_gpu_process, args=(gpu_id,))
+    t.daemon = True
+    t.start()
+    threads.append(t)
 
-if __name__ == "__main__":
-    try:
-        run_gpu(0)  # Sadece GPU 0 kullanılacak
-    except KeyboardInterrupt:
-        print("\n🛑 Kullanıcı tarafından durduruldu.")
-        sys.exit(0)
+# Ana thread'i çalışır halde tut
+try:
+    while True:
+        time.sleep(1)
+except KeyboardInterrupt:
+    print("⛔ Program kullanıcı tarafından durduruldu.")
