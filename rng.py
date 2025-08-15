@@ -8,7 +8,7 @@ PREFIX = "1PWo3JeB"
 RANGE_SIZE = 40
 LOWER_BOUND = 0x400000000000000000
 UPPER_BOUND = 0x7FFFFFFFFFFFFFFFFF
-FOUND_FILE = "ALL1.txt"
+FOUND_FILE = "ALL.txt"
 
 def run_gpu_process(gpu_id):
     print(f"🎯 GPU {gpu_id} başlatılıyor (range: {hex(LOWER_BOUND)} – {hex(UPPER_BOUND)})...")
