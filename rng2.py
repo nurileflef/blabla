@@ -1,252 +1,95 @@
-#!/usr/bin/env python3
-import secrets
-import random
 import subprocess
-import re
 import time
-import sys
-import errno
-import os
-import uuid
-import hashlib
-from multiprocessing import Process, Manager
+import threading
+import random
 
-# ======== GÜVENLİ PRINT WRAPPER ========
-original_print = print
-def print(*args, **kwargs):
-    try:
-        original_print(*args, **kwargs)
-    except IOError as e:
-        if getattr(e, "errno", None) != errno.EAGAIN:
-            raise
+# ========== AYARLAR ==========
 
-# ====== KULLANICI AYARLARI ======
-KEY_MIN        = int("400000000000000000", 16)
-KEY_MAX        = int("7FFFFFFFFFFFFFFFFF", 16)
-RANGE_BITS     = 40
-BLOCK_SIZE     = 1 << RANGE_BITS
-KEYSPACE_LEN   = KEY_MAX - KEY_MIN + 1
-MAX_OFFSET     = KEYSPACE_LEN - BLOCK_SIZE
+VANITYSEARCH_BIN = "./vanitysearch"
+TARGET_PATTERN = "1PWo3JeB9"
+RANGE_HEX = 1 << 40  # 2^37
+LOOP_DELAY = 0.5  # saniye
 
-VANITY         = "./vanitysearch"
-ALL_FILE       = "ALL1.txt"
-PREFIX         = "1PWo3JeB9"  # güncel prefix
+# Ortalama step büyüklüğü → random üretim bu değere göre olacak
+STEP_SIZE_HEX = "174576E38EF57B51C"  # örn: ~4.5 TB
+OUTPUT_FILE = "ALL1.txt"  # <<< TEK DOSYA >>>
 
-CONTINUE_MAP = {
-    "1PWo3JeB9jr": 75,
-    "1PWo3JeB9j":  10,
-    "1PWo3JeB9":   5,
-    "1PWo3JeB":    1,
+# GPU Aralıkları (start, end)
+GPU_RANGES = {
+    0: ("400000000000000000", "5FFFFFFFFFFFFFFFFF"),  # GPU 0 → 0x4000... - 0x5FFF...
+    1: ("600000000000000000", "7FFFFFFFFFFFFFFFFF"),  # GPU 1 → 0x6000... - 0x7FFF...
 }
-DEFAULT_CONTINUE = 1
 
-# ====== SKIP WINDOW PARAMETRELERİ ======
-SKIP_CYCLES    = 20
-SKIP_BITS_MIN  = 55
-SKIP_BITS_MAX  = 64
+# =========================================
 
-# ==============================================================================
-# ENTROPY/SEED & RANDOM BAŞLANGIÇ
-# ==============================================================================
-def strong_entropy_seed(gpu_id: int) -> int:
-    """
-    Her process/GPU için güçlü, benzersiz seed.
-    SHA3-512 ile urandom, zaman sayaçları, randbits, token, uuid ve hostname karıştırılır.
-    """
-    hostname = os.uname().nodename.encode()
-    material = b"".join([
-        os.urandom(32),
-        time.time_ns().to_bytes(8, "big", signed=False),
-        time.perf_counter_ns().to_bytes(8, "big", signed=False),
-        secrets.token_bytes(16),
-        secrets.randbits(256).to_bytes(32, "big"),
-        uuid.uuid4().bytes,
-        gpu_id.to_bytes(2, "big"),
-        os.getpid().to_bytes(4, "big"),
-        hostname,
-    ])
-    digest = hashlib.sha3_512(material).digest()
-    return int.from_bytes(digest, "big")
+def log(msg):
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}")
 
-def random_start() -> int:
-    """
-    KEY_MIN..KEY_MAX aralığında uniform bir nokta seçer ve RANGE_BITS'e hizalar.
-    """
-    random_offset = secrets.randbelow(KEYSPACE_LEN)
-    random_key = KEY_MIN + random_offset
-    block_mask = ~((1 << RANGE_BITS) - 1)
-    start = random_key & block_mask
-    if start < KEY_MIN:
-        start = KEY_MIN
-    print(f">>> random_start → start=0x{start:x}")
-    return start
+def generate_random_step(base_step_dec):
+    """Verilen base step (int) çevresinde ±%20 varyansla random step üretir"""
+    variance = int(base_step_dec * 0.2)
+    return random.randint(base_step_dec - variance, base_step_dec + variance)
 
-def random_start_unique(gpu_id: int, used_starts, lock) -> int:
+def generate_start_near_range_start(range_start_dec, base_step_dec):
     """
-    Tamamen random, GPU-özel entropy ile seed'lenmiş ve diğer GPU'larla çakışmayan başlangıç.
-    Manager.Lock ile check+set atomik yapılır.
+    Start, aralığın başına yakın olacak şekilde random offset ile belirlenir.
+    Offset büyüklüğü base_step_dec civarında seçildi.
     """
+    max_offset = base_step_dec  # Offset aralığını step büyüklüğüne göre ayarlıyoruz
+    offset = random.randint(0, max_offset)
+    return range_start_dec + offset
+
+def gpu_worker(gpu_id, start_hex, end_hex):
+    range_start = int(start_hex, 16)
+    range_end = int(end_hex, 16)
+    base_step = int(STEP_SIZE_HEX, 16)
+
     while True:
-        entropy_val = strong_entropy_seed(gpu_id)
-        random.seed(entropy_val)
-        candidate = random_start()
-        # Atomik check+claim
-        with lock:
-            if candidate not in used_starts:
-                used_starts[candidate] = 1
-                print(f"[GPU {gpu_id}] seed_tail={hex(entropy_val)[-16:]}, start=0x{candidate:x}")
-                return candidate
-        # Çakışma olursa döngü yeni entropy ile devam eder
+        # Yeni random step oluştur
+        step_size = generate_random_step(base_step)
+        step_hex = f"{step_size:X}"
 
-# ==============================================================================
-# YARDIMCI FONKSİYONLAR
-# ==============================================================================
-def wrap_inc(start: int, inc: int) -> int:
-    off = (start - KEY_MIN + inc) % (MAX_OFFSET + 1)
-    return KEY_MIN + off
+        # Başlangıç aralığın başına yakın olacak şekilde random offset ile belirleniyor
+        start = generate_start_near_range_start(range_start, base_step)
 
-def scan_at(start: int, gpu_id: int):
-    sh = f"{start:x}"
-    print(f">>> [GPU {gpu_id}] scan start=0x{sh}")
-    p = subprocess.Popen(
-        [VANITY, "-gpuId", str(gpu_id), "-o", ALL_FILE,
-         "-start", sh, "-range", str(RANGE_BITS), PREFIX],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, bufsize=1
-    )
-    header_done = False
-    hit = False
-    addr = priv = None
+        log(f"[GPU {gpu_id}] New STEP: {step_hex} | START: {start:016X}")
+        current = start
+        iteration = 0
 
-    for line in p.stdout:
-        if not header_done:
-            print(line, end="", flush=True)
-            if line.startswith("GPU:") or "VanitySearch" in line:
-                header_done = True
-            continue
+        while current + RANGE_HEX <= range_end:
+            start_hex_str = f"{current:016X}"
 
-        if line.startswith("Public Addr:"):
-            hit, addr = True, line.split()[-1].strip()
-            print(f"    !! public-hit: {addr}")
+            log(f"[GPU {gpu_id} | Iter {iteration}] start={start_hex_str}")
 
-        if "Priv (HEX):" in line and hit:
-            m = re.search(r"0x\s*([0-9A-Fa-f]+)", line)
-            if m:
-                priv = m.group(1).zfill(64)
-                print(f"    >> privkey: {priv}")
+            cmd = [
+                VANITYSEARCH_BIN,
+                "-gpuId", str(gpu_id),
+                "-o", OUTPUT_FILE,
+                "-start", start_hex_str,
+                "-range", "40",
+                TARGET_PATTERN
+            ]
 
-    p.wait()
-    return hit, addr, priv
+            try:
+                subprocess.run(cmd, check=True)
+            except subprocess.CalledProcessError as e:
+                log(f"[GPU {gpu_id}] ERROR: {e}")
 
-# ==============================================================================
-# WORKER
-# ==============================================================================
-def worker(gpu_id: int, used_starts, lock):
-    sorted_pfx      = sorted(CONTINUE_MAP.keys(), key=lambda p: -len(p))
-    start           = random_start_unique(gpu_id, used_starts, lock)
-    scan_ct         = 0
-    initial_window  = 0
-    window_rem      = 0
-    skip_rem        = 0
-    last_main_start = 0
+            current += step_size
+            iteration += 1
+            time.sleep(LOOP_DELAY)
 
-    print(f"\n→ [GPU {gpu_id}] Başlatıldı. CTRL-C ile durdurabilirsiniz\n")
+        log(f"[GPU {gpu_id}] Aralık bitti. Yeni random step + start ile tekrar başlıyoruz...\n")
 
-    try:
-        while True:
-            # ====== MAIN WINDOW ======
-            if window_rem > 0:
-                last_main_start = start
-                hit, addr, priv = scan_at(start, gpu_id)
-                scan_ct += 1
-
-                if hit and priv:
-                    matched = next((p) for p in sorted_pfx if addr.startswith(p)) if addr else PREFIX
-                    new_win = CONTINUE_MAP.get(matched, DEFAULT_CONTINUE)
-                    if new_win > initial_window:
-                        initial_window = new_win
-                        print(f"    >> [GPU {gpu_id}] nadir hit! window={initial_window}")
-
-                window_rem -= 1
-                print(f"    >> [GPU {gpu_id}] [MAIN WINDOW] {initial_window-window_rem}/{initial_window}")
-
-                if window_rem > 0:
-                    start = wrap_inc(start, BLOCK_SIZE)
-                else:
-                    skip_rem = SKIP_CYCLES
-                    print(f"    >> [GPU {gpu_id}] MAIN WINDOW bitti → skip-window={SKIP_CYCLES}\n")
-                continue
-
-            # ====== SKIP WINDOW ======
-            if skip_rem > 0:
-                bit_skip    = random.randrange(SKIP_BITS_MIN, SKIP_BITS_MAX+1)
-                skip_amt    = 1 << bit_skip
-                skip_start  = wrap_inc(last_main_start, skip_amt)
-                start       = skip_start
-                last_main_start = skip_start
-
-                print(f"    >> [GPU {gpu_id}] [SKIP WINDOW] {SKIP_CYCLES-skip_rem+1}/{SKIP_CYCLES}: {bit_skip}-bit skip → 0x{start:x}")
-
-                hit, addr, priv = scan_at(start, gpu_id)
-                scan_ct += 1
-
-                if hit and priv:
-                    matched = next((p) for p in sorted_pfx if addr.startswith(p)) if addr else PREFIX
-                    new_win = CONTINUE_MAP.get(matched, DEFAULT_CONTINUE)
-
-                    if new_win > initial_window:
-                        initial_window = new_win
-                    window_rem = initial_window
-                    skip_rem   = SKIP_CYCLES
-                    start      = wrap_inc(start, BLOCK_SIZE)
-                    print(f"    >> [GPU {gpu_id}] SKIP-HIT! matched={matched}, window={initial_window}\n")
-                else:
-                    skip_rem -= 1
-                    if skip_rem == 0:
-                        start = random_start_unique(gpu_id, used_starts, lock)
-                        print(f"    >> [GPU {gpu_id}] SKIP WINDOW no-hit → random_start\n")
-                continue
-
-            # ====== DEFAULT CONTINUE ======
-            for _ in range(DEFAULT_CONTINUE):
-                hit, addr, priv = scan_at(start, gpu_id)
-                scan_ct += 1
-                if hit and priv:
-                    matched        = next((p) for p in sorted_pfx if addr.startswith(p)) if addr else PREFIX
-                    initial_window = CONTINUE_MAP.get(matched, DEFAULT_CONTINUE)
-                    window_rem     = initial_window
-                    start          = wrap_inc(start, BLOCK_SIZE)
-                    print(f"    >> [GPU {gpu_id}] SEQ-HIT! matched={matched}, window={initial_window}\n")
-                    break
-                else:
-                    start = wrap_inc(start, BLOCK_SIZE)
-            else:
-                start = random_start_unique(gpu_id, used_starts, lock)
-
-            if scan_ct % 10 == 0:
-                print(f"[GPU {gpu_id} STATUS] scans={scan_ct}, next=0x{start:x}")
-
-    except KeyboardInterrupt:
-        print(f"\n>> [GPU {gpu_id}] Çıkıyor...")
-
-# ==============================================================================
-# MAIN
-# ==============================================================================
 def main():
-    gpu_count = 2  # 2 GPU için ayarlandı
-    manager = Manager()
-    used_starts = manager.dict()  # set gibi kullanılacak: key=candidate, val=1
-    lock = manager.Lock()
+    threads = []
+    for gpu_id, (start_hex, end_hex) in GPU_RANGES.items():
+        t = threading.Thread(target=gpu_worker, args=(gpu_id, start_hex, end_hex))
+        t.start()
+        threads.append(t)
 
-    workers = []
-    for gpu_id in range(gpu_count):
-        p = Process(target=worker, args=(gpu_id, used_starts, lock))
-        p.start()
-        workers.append(p)
-
-    for p in workers:
-        p.join()
+    for t in threads:
+        t.join()
 
 if __name__ == "__main__":
     main()
-
